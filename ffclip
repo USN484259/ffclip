@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+
+import re
+import os
+import shutil
+import argparse
+
+ffmpeg_bin = shutil.which("ffmpeg")
+
+
+time_pattern = re.compile(r"(?:(\d+):)?(\d+):(\d+)(.\d+)?")
+def parse_time(time_str):
+	time_match = time_pattern.fullmatch(time_str)
+	if not time_match:
+		raise ValueError(time_str)
+
+	hour = int(time_match.group(1) or "0")
+	minute = int(time_match.group(2) or "0")
+	second = int(time_match.group(3) or "0")
+	msec_str = time_match.group(4) or ""
+
+	return str(hour * 3600 + minute * 60 + second) + msec_str
+
+
+def build_filter_string(clips):
+	count = len(clips)
+	cmd_list = []
+	for i in range(count):
+		src_index, start_str, end_str = clips[i]
+		cmd_list.append(
+"""\
+[%d:v] trim=start=%s:end=%s,setpts=PTS-STARTPTS[v%d];
+[%d:a] atrim=start=%s:end=%s,asetpts=PTS-STARTPTS[a%d];\
+"""% (src_index, start_str, end_str, i, src_index, start_str, end_str, i))
+
+	# [v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]
+	cmd_list.append("".join(["[v%d][a%d]" % (i, i) for i in range(count)]) + "concat=n=%d:v=1:a=1[vout][aout]" % count)
+
+	for line in cmd_list:
+		print(line)
+
+	return " ".join(cmd_list)
+
+
+def build_input_string(inputs):
+	result = []
+	for src in inputs:
+		result.append("-i")
+		result.append(src)
+	return result
+
+
+def main(args):
+	if not ffmpeg_bin:
+		raise Exception("ffmpeg not found")
+
+	clip_pattern = re.compile(r"(?:(\d+)[@])?([\d:.]+)[-~]+([\d:.]+)")
+
+	clips = []
+	src_index = 0
+	for clip in args.clips:
+		clip_match = clip_pattern.fullmatch(clip)
+		if not clip_match:
+			raise ValueError(clip)
+		index_str = clip_match.group(1)
+		if index_str:
+			src_index = int(index_str)
+			if src_index >= len(args.inputs):
+				raise ValueError(clip)
+
+		start_time = parse_time(clip_match.group(2))
+		end_time = parse_time(clip_match.group(3))
+		clips.append((src_index, start_time, end_time))
+
+	ffmpeg_cmdline = ["ffmpeg"] + build_input_string(args.inputs) + [
+		"-filter_complex",
+		build_filter_string(clips),
+		"-map", "[vout]", "-map", "[aout]",
+		"-y", args.output
+	]
+	os.execv(ffmpeg_bin, ffmpeg_cmdline)
+
+
+if __name__ == "__main__":
+	parser = argparse.ArgumentParser()
+	parser.add_argument("-I", dest = "inputs", required = True, action = "append")
+	parser.add_argument("-O", dest = "output", required = True)
+	parser.add_argument("clips", nargs = '+', help = "[index@]start-end")
+
+	args = parser.parse_args()
+	main(args)
